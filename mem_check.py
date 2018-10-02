@@ -7,12 +7,12 @@ import socket
 class check_mem_usage():
 	def __init__(self, args=[]):
 		self.server = False
-		self.num_vf = 0
+		self.num_vf = 1
 		self.mlnx_dev = 'mlx5_x'
 		try:
 			opts, args = \
 			getopt.getopt(args,"hi:n:s:",["interface=", "num_vf=",
-				"server"])
+				"server="])
 		except getopt.GetoptError:
 			print 'mem_usage.py -i <interface> -n <num_vf> -s'
 			sys.exit(2)
@@ -25,26 +25,50 @@ class check_mem_usage():
 			elif opt in ("-n", "--num_vf"):
 				self.num_vf = int(arg)
 			elif opt in ("-s", "--server"):
-				self.server = True
+				self.server = bool(int(arg))
 
 		self.host = '192.168.100.2'
 		self.port = 5000
 		self.dmesg_file = "/tmp/page_usage"
+		self.page_file = "/tmp/give_page"
 
 		logging.basicConfig()
-		self.logger = logging.getLogger("mem_usage")
+		self.logger = logging.getLogger("mem_check")
 		self.logger.setLevel(logging.DEBUG)
 		if (self.server):
 			self.server_init()
 		else:
 			self.client_init()
 
+	def find(self, substr, infile, outfile):
+		with open(infile) as a, open(outfile, 'w') as b:
+			for line in a:
+				if substr in line:
+					b.write(line)
+
+	def find_count(self, substr, infile):
+		count = 0
+		with open(infile) as file:
+			for line in file:
+				words = line.split()
+				count += int(words[words.index(substr) + 1].replace(",", ""))
+		return count
+
+	def end_connection(self):
+		if (self.server):
+			self.server_conn.close()
+		else:
+			self.client_socket.close()
+
 	def run_cmd(self, cmd):
 		#args = shlex.split(cmd)
-		return subprocess.check_output(cmd, shell=True)
-		#process = subprocess.Popen(cmd.split(), stdout=subprocess.PIPE)
-		#output, error = process.communicate()
-		#return output
+		try:
+			output = subprocess.check_output(cmd, shell=True)
+		except subprocess.CalledProcessError as e:
+			print e.output
+			self.end_connection()
+			sys.exit("cmd: " + cmd)
+		return output
 
 	def query_free_mem(self):
 		cmd = "vmstat -s"
@@ -54,14 +78,18 @@ class check_mem_usage():
 		return mem_used
 
 	def setup_vf(self):
+		cmd_current_vf = ("cat /sys/class/infiniband/" + self.mlnx_dev + "/device/mlx5_num_vfs")
 		cmd_reset_vf = ("echo 0 > /sys/class/infiniband/" + self.mlnx_dev + "/device/mlx5_num_vfs")
 		cmd_set_vf = ("echo "+ str(self.num_vf) + " > /sys/class/infiniband/" + self.mlnx_dev +
 				"/device/mlx5_num_vfs")
 		message = 'done'
 
-		self.logger.debug("Reseting %s num of VF to 0", self.mlnx_dev)
-		self.run_cmd(cmd_reset_vf)
-		time.sleep(30)
+		count = self.run_cmd(cmd_current_vf)
+		self.logger.debug("%s has %d VF enabled", self.mlnx_dev, int(count))
+		if (int(count) > 0):
+			self.logger.debug("Reseting %s num of VF to 0", self.mlnx_dev)
+			self.run_cmd(cmd_reset_vf)
+			time.sleep(40)
 		self.client_socket.send(message.encode())
 
 		self.logger.debug("Setting %s num of VF to %d", self.mlnx_dev, self.num_vf)
@@ -72,8 +100,8 @@ class check_mem_usage():
 	def start_record_dmesg(self):
 		self.run_cmd("echo 'module mlx5_core +p' > /sys/kernel/debug/dynamic_debug/control")
 		self.run_cmd("dmesg -C")
-		cmd = "dmesg -w > /tmp/page_usage &"
-		self.logger.debug("Saving dmesg to /tmp/page_usage")
+		cmd = ("dmesg -w > " + self.dmesg_file + " &")
+		self.logger.debug("Saving dmesg to %s", self.dmesg_file)
 		self.run_cmd(cmd)
 
 	def stop_record_dmesg(self):
@@ -116,9 +144,17 @@ class check_mem_usage():
 			mem_after = int(self.query_free_mem()) / 1024
 			self.stop_record_dmesg()
 			self.server_conn.close()
+
+			self.find("give_pages", self.dmesg_file, self.page_file)
+			page_used = self.find_count("npages", self.page_file)
 			mem_used = abs(mem_after - mem_before)
-			self.logger.info("Total Memory Usage: %d MB, before %d MB, after %d MB",
-					mem_used, mem_before, mem_after)
+
+			self.logger.info("-----------------------------------------")
+			self.logger.info("\tMemory Usage Total:\t\t%d MB", mem_used)
+			self.logger.debug("\t  Before:\t\t%d MB", mem_before)
+			self.logger.debug("\t  After:\t\t%d MB", mem_after)
+			self.logger.info("\tPage Usage Total:\t\t%d", page_used)
+			self.logger.info("-----------------------------------------")
 		else:
 			self.setup_vf()
 			self.client_socket.close()
