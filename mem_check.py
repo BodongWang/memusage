@@ -3,22 +3,25 @@
 import subprocess, shlex, logging, sys, getopt, time
 from subprocess import call
 import socket
+import os.path
 
 class check_mem_usage():
 	def __init__(self, args=[]):
 		self.server = False
 		self.num_vf = 1
 		self.mlnx_dev = 'mlx5_x'
+		self.num_rules = 0
+		self.rules_script = "./tc-batch-l2-random-rule.sh"
 		try:
 			opts, args = \
-			getopt.getopt(args,"hi:n:s:",["interface=", "num_vf=",
-				"server="])
+				getopt.getopt(args,"hi:n:s:r:",
+					["interface=", "num_vf=", "server=", "num_rules="])
 		except getopt.GetoptError:
-			print 'mem_usage.py -i <interface> -n <num_vf> -s'
-			sys.exit(2)
+			print 'mem_usage.py -i <interface> -n <num_vf> -s <0|1> -r <num_rules>'
+			sys.exit(1)
 		for opt, arg in opts:
 			if opt == '-h':
-				print 'mem_usage.py -i <interface> -n <num_vf>'
+				print 'mem_usage.py -i <interface> -n <num_vf> -s <0|1> -r <num_rules>'
 				sys.exit()
 			elif opt in ("-i", "--interface"):
 				self.mlnx_dev = arg
@@ -26,6 +29,8 @@ class check_mem_usage():
 				self.num_vf = int(arg)
 			elif opt in ("-s", "--server"):
 				self.server = bool(int(arg))
+			elif opt in ("-r", "--num_rules"):
+				self.num_rules= int(arg)
 
 		self.host = '192.168.100.2'
 		self.port = 5000
@@ -35,10 +40,16 @@ class check_mem_usage():
 		logging.basicConfig()
 		self.logger = logging.getLogger("mem_check")
 		self.logger.setLevel(logging.DEBUG)
-		if (self.server):
-			self.server_init()
+
+		if (self.num_rules == 0):
+			if (self.server):
+				self.server_init()
+			else:
+				self.client_init()
 		else:
-			self.client_init()
+			if not os.path.exists(self.rules_script):
+				self.logger.error("%d doesn't exist", rules_script)
+				sys.exit(2)
 
 	def find(self, substr, infile, outfile):
 		with open(infile) as a, open(outfile, 'w') as b:
@@ -66,7 +77,8 @@ class check_mem_usage():
 			output = subprocess.check_output(cmd, shell=True)
 		except subprocess.CalledProcessError as e:
 			print e.output
-			self.end_connection()
+			if (self.num_rules == 0):
+				self.end_connection()
 			sys.exit("cmd: " + cmd)
 		return output
 
@@ -97,6 +109,11 @@ class check_mem_usage():
 		time.sleep(5)
 		self.client_socket.send(message.encode())
 
+	def setup_rules(self):
+		cmd_setup_rules = (self.rules_script + " " + self.mlnx_dev + " " + str(self.num_rules))
+		self.run_cmd(cmd_setup_rules)
+		time.sleep(3)
+
 	def start_record_dmesg(self):
 		self.run_cmd("echo 'module mlx5_core +p' > /sys/kernel/debug/dynamic_debug/control")
 		self.run_cmd("dmesg -C")
@@ -106,6 +123,7 @@ class check_mem_usage():
 
 	def stop_record_dmesg(self):
 		self.run_cmd("killall dmesg")
+		self.run_cmd("echo 'module mlx5_core -p' > /sys/kernel/debug/dynamic_debug/control")
 
 	def server_init(self):
 		server_socket = socket.socket()
@@ -132,7 +150,7 @@ class check_mem_usage():
 		self.client_socket.connect((self.host, self.port))
 		self.logger.info("Connected to: " + self.host + ":" + str(self.port))
 
-	def run(self):
+	def check_rep(self):
 		if (self.server):
 			# Wait for host VF to reset
 			self.server_wait_for_vf()
@@ -159,6 +177,25 @@ class check_mem_usage():
 			self.setup_vf()
 			self.client_socket.close()
 			self.logger.info("Set up %d VFs done.", self.num_vf)
+
+	def check_rules(self):
+		self.logger.info("Check mem usage of ovs rules")
+		mem_before = int(self.query_free_mem()) / 1024
+		self.setup_rules()
+		mem_after = int(self.query_free_mem()) / 1024
+		mem_used = abs(mem_after - mem_before)
+
+		self.logger.info("-----------------------------------------")
+		self.logger.info("\tMemory Usage Total:\t\t%d MB", mem_used)
+		self.logger.debug("\t  Before:\t\t%d MB", mem_before)
+		self.logger.debug("\t  After:\t\t%d MB", mem_after)
+		self.logger.info("-----------------------------------------")
+
+	def run(self):
+		if (self.num_rules):
+			self.check_rules()
+		else:
+			self.check_rep()
 
 if __name__ == "__main__":
 	test = check_mem_usage(sys.argv[1:])
