@@ -3,7 +3,7 @@
 import subprocess, shlex, logging, sys, getopt, time
 from subprocess import call
 import socket
-import os.path
+import os, os.path, random
 
 def run_cmd(cmd, cleanup=None):
 	#args = shlex.split(cmd)
@@ -183,13 +183,16 @@ class check_rep_mem():
 
 			self.find("give_pages", self.dmesg_file, self.page_file)
 			page_used = self.find_count("npages", self.page_file)
+			fw_mem_used = page_used * 4 / 1024
 			mem_used = abs(mem_after - mem_before)
 
 			self.logger.info("-----------------------------------------")
-			self.logger.info("\tMemory Usage Total:\t\t%d MB", mem_used)
-			self.logger.debug("\t  Before:\t\t%d MB", mem_before)
-			self.logger.debug("\t  After:\t\t%d MB", mem_after)
-			self.logger.info("\tPage Usage Total:\t\t%d", page_used)
+			self.logger.info("\tMemory Usage Total:\t%d MB", mem_used)
+			self.logger.debug("\t  Before:\t%d MB", mem_before)
+			self.logger.debug("\t  After:\t%d MB", mem_after)
+			self.logger.info("\tFirmware Page:\t\t%d", page_used)
+			self.logger.info("\tFirmware Memory:\t%d MB", fw_mem_used)
+			self.logger.info("\tDriver Memory:\t\t%d MB", mem_used - fw_mem_used)
 			self.logger.info("-----------------------------------------")
 		else:
 			self.client_setup_vf()
@@ -200,22 +203,78 @@ class check_rep_mem():
 		self.check_rep()
 
 class check_rule_mem():
-	def __init__(self, log, rep, num_rules=1):
+	def __init__(self, log, rep, num_rules=1, offload="on"):
 		self.rules_script = "./tc-batch-l2-random-rule.sh"
 		self.rep = rep
 		self.num_rules = num_rules
 		self.logger = log
+		self.tmp_tc_dir = "/tmp/tc_batch"
+		self.offload = offload
+		log.debug("rep = %s, num_rules = %d, offload = %s",
+				rep, num_rules, offload)
 		if not os.path.exists(self.rules_script):
 			self.logger.error("%d doesn't exist", rules_script)
 			sys.exit(2)
 
+	def rand_mac(self, bit_mask=0xff):
+    		return "%02x:%02x:%02x:%02x:%02x:%02x" % (
+			random.randint(0, 100),
+			random.randint(0, 100),
+			random.randint(0, 100),
+			random.randint(0, 100),
+			random.randint(0, 100),
+			random.randint(0, 100) & bit_mask)
+
+	def tc_cmd(self, skip, src_mac, dst_mac):
+		return (("filter add dev %s prio 1 protocol ip parent ffff: flower %s src_mac %s dst_mac %s action drop\n") % (
+			 self.rep, skip, src_mac, dst_mac))
+
+
+	def setup_rep(self):
+		cmd_list = []
+		cmd_list.append("ifconfig " + self.rep + " up")
+		cmd_list.append("tc qdisc del dev " + self.rep + " ingress > /dev/null")
+		cmd_list.append("rm -rf " + self.tmp_tc_dir)
+		cmd_list.append("mkdir " + self.tmp_tc_dir)
+		cmd_list.append("ethtool -K " + self.rep + " hw-tc-offload " + self.offload)
+		cmd_list.append("tc qdisc add dev " + self.rep + " ingress")
+		self.logger.debug("Reset tc and offload")
+		for cmd in cmd_list:
+			run_cmd(cmd)
+		time.sleep(1)
+
+		file_index = 0
+		file_path = (self.tmp_tc_dir + "/batch." + str(file_index))
+		file = open(file_path, "w")
+		if self.offload is "on":
+			skip = "skip_sw"
+		else:
+			skip = "skip_hw"
+
+		for num in range(0, self.num_rules):
+			new_index = int(num / 50000)
+			if (new_index != file_index):
+				file_index = new_index
+				file_path = (self.tmp_tc_dir + "/batch." + str(file_index))
+				file.close()
+				file = open(file_path, "a")
+			src_mac = self.rand_mac(0xfe)
+			dst_mac = self.rand_mac()
+			tc_cmd = self.tc_cmd(skip, src_mac, dst_mac)
+			file.write(tc_cmd)
+
+		file.close()
+
 	def setup_rules(self):
-		cmd_setup_rules = (self.rules_script + " " + self.rep+ " " + str(self.num_rules))
-		run_cmd(cmd_setup_rules)
+		for filename in os.listdir(self.tmp_tc_dir):
+			cmd_insert_rules = ("tc -b " + self.tmp_tc_dir + "/" + filename)
+			self.logger.debug(cmd_insert_rules)
+			run_cmd(cmd_insert_rules)
 		time.sleep(3)
 
 	def check_rules(self):
 		self.logger.info("Check mem usage of ovs rules")
+		self.setup_rep()
 		mem_before = query_free_mem()
 		self.setup_rules()
 		mem_after = query_free_mem()
