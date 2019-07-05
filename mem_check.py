@@ -42,8 +42,7 @@ class check_mem_usage():
 			sys.exit(1)
 		for opt, arg in opts:
 			if opt == '-h':
-				print ('mem_usage.py -i <interface> -n <num_vf> \
-						-s <0|1> -r <num_rules>')
+				print ('mem_usage.py -i <interface> -n <num_vf> -s <0|1> -r <num_rules>')
 				sys.exit()
 			elif opt in ("-i", "--interface"):
 				mlnx_dev = arg
@@ -72,10 +71,11 @@ class check_rep_mem():
 		self.mlnx_dev = mlx5_dev
 		self.server = server
 		self.num_vf = num_vf
-		self.host = '192.168.100.2'
+		self.host = 'sw-mtx-003-022'
 		self.port = 5000
 		self.dmesg_file = "/tmp/page_usage"
-		self.page_file = "/tmp/give_page"
+		self.give_page_file = "/tmp/give_page"
+		self.reclaim_page_file = "/tmp/reclaim_page"
 
 		if (server):
 			self.server_init()
@@ -131,8 +131,10 @@ class check_rep_mem():
 		self.client_socket.send(message.encode())
 
 	def start_record_dmesg(self):
-		self.check_rep_cmd("echo 'module mlx5_core +p' > \
+		self.check_rep_cmd("echo 'func give_pages +p' > \
 			/sys/kernel/debug/dynamic_debug/control")
+		self.check_rep_cmd("echo 'func reclaim_pages +p' > \
+				/sys/kernel/debug/dynamic_debug/control")
 		self.check_rep_cmd("dmesg -C")
 		cmd = ("dmesg -w > " + self.dmesg_file + " &")
 		self.logger.debug("Saving dmesg to %s", self.dmesg_file)
@@ -140,7 +142,7 @@ class check_rep_mem():
 
 	def stop_record_dmesg(self):
 		self.check_rep_cmd("killall dmesg")
-		self.check_rep_cmd("echo 'module mlx5_core -p' > \
+		self.check_rep_cmd("echo -n '-p' > \
 			/sys/kernel/debug/dynamic_debug/control")
 
 	def server_init(self):
@@ -176,13 +178,17 @@ class check_rep_mem():
 			mem_before = query_free_mem()
 			# Wait for host VF to setup
 			self.server_wait_for_vf()
-			self.server_bringup_rep()
+			#self.server_bringup_rep()
 			mem_after = query_free_mem()
 			self.stop_record_dmesg()
 			self.server_conn.close()
 
-			self.find("give_pages", self.dmesg_file, self.page_file)
-			page_used = self.find_count("npages", self.page_file)
+			self.find("give_pages", self.dmesg_file, self.give_page_file)
+			give_page = self.find_count("npages", self.give_page_file)
+			self.find("reclaim_pages", self.dmesg_file, self.reclaim_page_file)
+			reclaim_page = self.find_count("npages", self.reclaim_page_file)
+			page_used = give_page - reclaim_page
+
 			fw_mem_used = page_used * 4 / 1024
 			mem_used = abs(mem_after - mem_before)
 
